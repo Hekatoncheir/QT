@@ -1,0 +1,150 @@
+#include "tcpserver.h"
+#include "ui_tcpserver.h"
+#include <QTcpSocket>
+#include <QFileDialog>
+#include <QMessageBox>
+
+TcpServer::TcpServer(QWidget *parent) :
+    QDialog(parent),
+    ui(new Ui::TcpServer)
+{
+    ui->setupUi(this);
+    this->setFixedSize(350,180);
+
+    tcpPort = 6666;
+    tcpServer = new QTcpServer(this);  
+    connect(tcpServer,SIGNAL(newConnection()),this,SLOT(sendMessage()));
+
+    initServer();
+
+}
+
+TcpServer::~TcpServer()
+{
+    delete ui;
+}
+
+void TcpServer::changeEvent(QEvent *e)
+{
+    QDialog::changeEvent(e);
+    switch (e->type()) {
+    case QEvent::LanguageChange:
+        ui->retranslateUi(this);
+        break;
+    default:
+        break;
+    }
+}
+
+void TcpServer::sendMessage()  //发送数据
+{
+    ui->serverSendBtn->setEnabled(false);
+    clientConnection = tcpServer->nextPendingConnection();
+    connect(clientConnection,SIGNAL(bytesWritten(qint64)),SLOT(updateClientProgress(qint64)));
+
+    ui->serverStatusLabel->setText(tr("start to send the file %1 !").arg(theFileName));
+
+    localFile = new QFile(fileName);
+    if(!localFile->open((QFile::ReadOnly))){
+        QMessageBox::warning(this,tr("APP"),tr("Can't read the file %1:\n%2").arg(fileName).arg(localFile->errorString()));
+        return;
+    }
+    TotalBytes = localFile->size();
+    QDataStream sendOut(&outBlock,QIODevice::WriteOnly);
+    sendOut.setVersion(QDataStream::Qt_4_6);
+    time.start();  //开始计时
+    QString currentFile = fileName.right(fileName.size() - fileName.lastIndexOf('/')-1);
+    sendOut<<qint64(0)<<qint64(0)<<currentFile;
+    TotalBytes += outBlock.size();
+    sendOut.device()->seek(0);
+    sendOut<<TotalBytes<<qint64((outBlock.size()-sizeof(qint64)*2));
+    bytesToWrite = TotalBytes - clientConnection->write(outBlock);
+    qDebug()<<currentFile<<TotalBytes;
+    outBlock.resize(0);
+
+}
+
+void TcpServer::updateClientProgress(qint64 numBytes)//更新进度条
+{
+    bytesWritten += (int)numBytes;
+    if(bytesToWrite > 0){
+        outBlock = localFile->read(qMin(bytesToWrite,loadSize));
+        bytesToWrite -= (int)clientConnection->write(outBlock);
+        outBlock.resize(0);
+    }
+    else{
+        localFile->close();
+    }
+    ui->progressBar->setMaximum(TotalBytes);
+    ui->progressBar->setValue(bytesWritten);
+
+   float useTime = time.elapsed();
+   double speed = bytesWritten / useTime;
+   ui->serverStatusLabel->setText(tr("receive %1MB (%2MB/s) \nall%3MB Time:%4秒\nRemaining time:%5秒")
+                                  .arg(bytesWritten / (1024*1024))//已发送
+                                  .arg(speed*1000/(1024*1024),0,'f',2)//速度
+                                  .arg(TotalBytes / (1024 * 1024))//总大小
+                                  .arg(useTime/1000,0,'f',0)//用时
+                                  .arg(TotalBytes/speed/1000 - useTime/1000,0,'f',0));//剩余时间
+
+    if(bytesWritten == TotalBytes)
+        ui->serverStatusLabel->setText(tr("send file %1 success").arg(theFileName));
+
+}
+
+void TcpServer::on_serverOpenBtn_clicked()  //打开
+{
+    fileName = QFileDialog::getOpenFileName(this);
+    if(!fileName.isEmpty())
+    {
+        theFileName = fileName.right(fileName.size() - fileName.lastIndexOf('/')-1);
+        ui->serverStatusLabel->setText(tr("file: %1 ").arg(theFileName));
+        ui->serverSendBtn->setEnabled(true);
+        ui->serverOpenBtn->setEnabled(false);
+    }
+}
+
+void TcpServer::refused()   //被对方拒绝
+{
+    tcpServer->close();
+    ui->serverStatusLabel->setText(tr("Turn Down!!!"));
+}
+
+void TcpServer::on_serverSendBtn_clicked()  //发送
+{
+    if(!tcpServer->listen(QHostAddress::Any,tcpPort))//开始监听
+    {
+        qDebug() << tcpServer->errorString();
+        close();
+        return;
+    }
+
+    ui->serverStatusLabel->setText(tr("Wait... ..."));
+    emit sendFileName(theFileName);
+}
+
+void TcpServer::on_serverCloseBtn_clicked()//退出
+{   
+    if(tcpServer->isListening())
+    {
+        tcpServer->close();
+        clientConnection->abort();
+    }
+    this->close();
+}
+
+void TcpServer::initServer()//初始化
+{
+    loadSize = 4*1024;
+    TotalBytes = 0;
+    bytesWritten = 0;
+    bytesToWrite = 0;
+
+    ui->serverStatusLabel->setText(tr("Choice file"));
+    ui->progressBar->reset();
+    ui->serverOpenBtn->setEnabled(true);
+    ui->serverSendBtn->setEnabled(false);
+
+    tcpServer->close();
+
+}
